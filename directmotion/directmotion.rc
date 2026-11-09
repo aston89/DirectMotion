@@ -1,0 +1,95 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include "resource.h"
+#include "version.h"
+
+IDD_DIRECTMOTION_SETTINGS DIALOGEX 0, 0, 520, 640
+STYLE DS_SETFONT | WS_CHILD | WS_CAPTION
+FONT 9, "Segoe UI"
+BEGIN
+    CONTROL         "Enable interpolation", IDC_ENABLED, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 8, 150, 14
+
+    GROUPBOX        "Output timing", -1, 8, 27, 504, 48
+    LTEXT           "Target FPS", -1, 18, 44, 68, 12
+    COMBOBOX        IDC_RATE_MODE, 91, 41, 176, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Auto matches the refresh rate of the monitor hosting the video.", -1, 282, 43, 215, 24
+
+    GROUPBOX        "Quick profiles — complete MAnalyse + MRecalculate chains", -1, 8, 80, 504, 55
+    LTEXT           "Profile", -1, 18, 97, 72, 12
+    COMBOBOX        IDC_PERFORMANCE, 91, 94, 180, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "MAnalyse grid", -1, 288, 97, 66, 12
+    COMBOBOX        IDC_GRID, 356, 94, 142, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Refinement", -1, 18, 118, 68, 12
+    COMBOBOX        IDC_QUICK_RECALC, 91, 114, 407, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    GROUPBOX        "CPU scheduling / AviSynth Prefetch", -1, 8, 137, 504, 70
+    LTEXT           "CPU profile", -1, 18, 154, 58, 12
+    COMBOBOX        IDC_CPU_PROFILE, 80, 151, 158, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Custom", -1, 244, 154, 40, 12
+    EDITTEXT        IDC_CPU_WORKERS, 284, 151, 42, 14, ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Batch", -1, 335, 154, 45, 12
+    COMBOBOX        IDC_RECEIVE_BATCH, 382, 151, 62, 85, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Prefetch frames", -1, 18, 181, 83, 12
+    COMBOBOX        IDC_PREFETCH_FRAMES, 104, 178, 132, 150, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Independent of profiles. Auto = 2x workers; larger windows use more RAM and increase startup/seek buffering.", IDC_CPU_HINT, 245, 179, 253, 28
+
+    CONTROL         "Use advanced MVTools overrides (requires graph rebuild; player must be stopped)", IDC_ADVANCED_MVTOOLS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 213, 490, 14
+
+    GROUPBOX        "MSuper — pyramid preparation", -1, 8, 233, 504, 55
+    LTEXT           "Pel", -1, 18, 250, 25, 12
+    COMBOBOX        IDC_SUPER_PEL, 44, 247, 70, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Sharp", -1, 128, 250, 33, 12
+    COMBOBOX        IDC_SUPER_SHARP, 164, 247, 65, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "RFilter", -1, 247, 250, 40, 12
+    COMBOBOX        IDC_SUPER_RFILTER, 289, 247, 65, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Levels (0=auto)", -1, 365, 250, 74, 12
+    EDITTEXT        IDC_SUPER_LEVELS, 441, 247, 55, 14, ES_AUTOHSCROLL | WS_TABSTOP
+
+    GROUPBOX        "MAnalyse — first-pass motion vectors", -1, 8, 292, 504, 91
+    LTEXT           "Block", -1, 18, 311, 34, 12
+    COMBOBOX        IDC_ANALYSE_BLOCK, 54, 308, 72, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Search type", -1, 138, 311, 54, 12
+    COMBOBOX        IDC_ANALYSE_SEARCH, 195, 308, 166, 130, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Param", -1, 373, 311, 30, 12
+    EDITTEXT        IDC_ANALYSE_SEARCH_PARAM, 408, 308, 47, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Bad range", -1, 18, 338, 52, 12
+    EDITTEXT        IDC_ANALYSE_BADRANGE, 72, 335, 48, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Overlap (even)", -1, 136, 338, 74, 12
+    EDITTEXT        IDC_ANALYSE_OVERLAP, 213, 335, 45, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    CONTROL         "Chroma (all stages)", IDC_ANALYSE_CHROMA, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 278, 336, 92, 14
+    CONTROL         "True motion (both passes)", IDC_ANALYSE_TRUEMOTION, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 382, 336, 88, 14
+    LTEXT           "Search IDs: 0 one-time, 1 N-step, 2 diamond, 3 exhaustive, 4 hexagon, 5 UMH, 6 horizontal, 7 vertical.", -1, 18, 360, 480, 12
+
+    GROUPBOX        "MRecalculate — vector refinement", -1, 8, 386, 504, 78
+    LTEXT           "Block", -1, 18, 403, 34, 12
+    COMBOBOX        IDC_RECALC_BLOCK, 54, 400, 72, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Search", -1, 138, 403, 37, 12
+    COMBOBOX        IDC_RECALC_SEARCH, 178, 400, 136, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Param", -1, 325, 403, 30, 12
+    EDITTEXT        IDC_RECALC_SEARCH_PARAM, 358, 400, 45, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Overlap (even)", -1, 18, 431, 74, 12
+    EDITTEXT        IDC_RECALC_OVERLAP, 96, 428, 45, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Search IDs are the MVTools values 0–7; block size and overlap must be compatible.", -1, 158, 431, 335, 12
+
+    GROUPBOX        "MBlockFps — interpolation and scene changes", -1, 8, 467, 504, 84
+    LTEXT           "Mode", -1, 18, 484, 32, 12
+    COMBOBOX        IDC_BLOCKFPS_MODE, 53, 481, 190, 130, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "ML mask", -1, 258, 484, 44, 12
+    EDITTEXT        IDC_BLOCKFPS_ML, 304, 481, 55, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    CONTROL         "Blend at scene change", IDC_BLOCKFPS_BLEND, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 374, 482, 122, 14
+    LTEXT           "thSCD1", -1, 18, 513, 39, 12
+    EDITTEXT        IDC_TH_SCD1, 59, 510, 55, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "thSCD2", -1, 132, 513, 39, 12
+    EDITTEXT        IDC_TH_SCD2, 173, 510, 55, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Mode 0–8 controls block compensation; ML and SCD thresholds tune occlusion/scene-change behavior.", -1, 244, 513, 252, 24
+
+    CONTROL         "Save first input BMP beside directmotion.ax", IDC_SAVE_FIRST_INPUT_BMP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 568, 260, 14
+    CONTROL         "Write diagnostic directmotion.log", IDC_ENABLE_LOGGING, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 282, 568, 220, 14
+    LTEXT           "2x / 2.5x / 3x / 4x or Auto (display refresh). Settings apply when stopped.", IDC_CAPABILITIES, 10, 589, 500, 18
+    LTEXT           "Input: NV12/NV21. Stored under HKCU\\Software\\directmotion.", IDC_INFO, 10, 611, 500, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_DIRECTMOTION_TITLE "directmotion — AviSynth+ / MVTools2 (Auto / 2x / 2.5x / 3x / 4x)"
+END

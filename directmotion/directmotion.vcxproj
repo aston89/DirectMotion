@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{F0588A76-55EA-4BA2-B416-29F04485C849}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>directmotion</RootNamespace>
+    <ProjectName>directmotion</ProjectName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <AviSynthRoot Condition="'$(AviSynthRoot)'=='' and '$(AVISYNTH_ROOT)'!=''">$(AVISYNTH_ROOT)</AviSynthRoot>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="$(SolutionDir)common\platform.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <PlatformToolset>v143</PlatformToolset>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(SolutionDir)common\common.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <TargetName>directmotion</TargetName>
+    <TargetExt>.ax</TargetExt>
+    <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(SolutionDir)bin_$(PlatformName)\lib\</OutDir>
+    <IntDir>$(SolutionDir)bin_$(PlatformName)\$(ProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_WIN32_WINNT=0x0A00;NOMINMAX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>$(AviSynthRoot)\include;$(AviSynthRoot)\avs_core\include;$(SolutionDir)common\baseclasses;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ResourceCompile>
+      <Culture>0x0409</Culture>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <ModuleDefinitionFile>directmotion.def</ModuleDefinitionFile>
+      <AdditionalLibraryDirectories>$(SolutionDir)bin_$(PlatformName)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>legacy_stdio_definitions.lib;strmiids.lib;ole32.lib;oleaut32.lib;uuid.lib;advapi32.lib;comctl32.lib;user32.lib;gdi32.lib;winmm.lib;shell32.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="directmotion.cpp" />
+    <ClCompile Include="directmotionSettings.cpp" />
+    <ClCompile Include="AviSynthMvToolsEngine.cpp" />
+    <ClCompile Include="RuntimeDiagnostics.cpp" />
+    <ClCompile Include="AsyncPipelineState.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="directmotion.h" />
+    <ClInclude Include="AviSynthMvToolsEngine.h" />
+    <ClInclude Include="FrucRational.h" />
+    <ClInclude Include="directmotionSettings.h" />
+    <ClInclude Include="RuntimeDiagnostics.h" />
+    <ClInclude Include="PipelineStallDiagnostics.h" />
+    <ClInclude Include="DeliveryLatencyDiagnostics.h" />
+    <ClInclude Include="SourceCacheRetention.h" />
+    <ClInclude Include="PauseFrameGate.h" />
+    <ClInclude Include="PauseReceiveBackpressure.h" />
+    <ClInclude Include="PauseRetentionPolicy.h" />
+    <ClInclude Include="InitialPrerollPolicy.h" />
+    <ClInclude Include="InitialSegmentGraphPolicy.h" />
+    <ClInclude Include="InitialSegmentStagingPolicy.h" />
+    <ClInclude Include="InitialSourceGenerationRebindPolicy.h" />
+    <ClInclude Include="ResumeWarmStart.h" />
+    <ClInclude Include="SeekFallbackPolicy.h" />
+    <ClInclude Include="SeekFallbackGenerationPolicy.h" />
+    <ClInclude Include="SeekResetGenerationPolicy.h" />
+    <ClInclude Include="SeekTransitionBlend.h" />
+    <ClInclude Include="SeekHandoffStatusPolicy.h" />
+    <ClInclude Include="SampleTimePolicy.h" />
+    <ClInclude Include="EngineBootstrapCommitPolicy.h" />
+    <ClInclude Include="ReceiveCommitPolicy.h" />
+    <ClInclude Include="SourceBootstrapQueue.h" />
+    <ClInclude Include="LifecycleTransitionGate.h" />
+    <ClInclude Include="ProcessingContinuation.h" />
+    <ClInclude Include="ProcessingQuiescence.h" />
+    <ClInclude Include="ProcessingGenerationPolicy.h" />
+    <ClInclude Include="MAnalyseInvocationPolicy.h" />
+    <ClInclude Include="BootstrapQueueState.h" />
+    <ClInclude Include="BootstrapEvaluationPolicy.h" />
+    <ClInclude Include="SeekFrontierPolicy.h" />
+    <ClInclude Include="AsyncPipelineState.h" />
+    <ClInclude Include="uids.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="version.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="directmotion.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="directmotion.rc" />
+    <ResourceCompile Include="Version.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\common\baseclasses\baseclasses.vcxproj">
+      <Project>{E8A3F6FA-AE1C-4C8E-A0B6-9C8480324EAA}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+      <UseLibraryDependencyInputs>false</UseLibraryDependencyInputs>
+    </ProjectReference>
+  </ItemGroup>
+  <Target Name="RequireAviSynthSdk" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(AviSynthRoot)\include\avisynth.h') and !Exists('$(AviSynthRoot)\avs_core\include\avisynth.h')" Text="AviSynth+ backend requires avisynth.h. Set AVISYNTH_ROOT to the AviSynth+ SDK/source root; no FFmpeg or Vulkan SDK is used." />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

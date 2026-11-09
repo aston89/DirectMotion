@@ -1,0 +1,7 @@
+# Generated runtime logs and build/package output
+/directmotion.log
+/x64/
+/package/
+/directmotion-win64.zip
+/bin_x64/
+/bin_x64d/

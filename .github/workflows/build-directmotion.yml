@@ -1,0 +1,684 @@
+name: Build directmotion (AviSynth+ / MVTools2 only)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-win64:
+    name: Build DirectShow filter (x64)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Configure Python for workflow validation
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14.10'
+          check-latest: false
+
+      - name: Obtain AviSynth+ SDK headers (compile-time only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'AviSynthPlus'
+          $avisynthTag = 'v3.7.5'
+          $expectedCommitPrefix = '6c7c266'
+          git clone --depth 1 --branch $avisynthTag --single-branch https://github.com/AviSynth/AviSynthPlus.git $root
+          if ($LASTEXITCODE -ne 0) { throw "AviSynth+ checkout failed with exit code $LASTEXITCODE" }
+          $actualCommit = (git -C $root rev-parse HEAD).Trim()
+          if (-not $actualCommit.StartsWith($expectedCommitPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "AviSynth+ pin mismatch: expected v3.7.5/$expectedCommitPrefix, received $actualCommit"
+          }
+          $headName = (git -C $root rev-parse --abbrev-ref HEAD).Trim()
+          if ($headName -ne 'HEAD') { throw "AviSynth+ checkout is not detached: $headName" }
+          Write-Host "AviSynth+ compile-time headers pinned to $avisynthTag ($actualCommit)"
+          $candidates = @(
+            (Join-Path $root 'include\avisynth.h'),
+            (Join-Path $root 'avs_core\include\avisynth.h')
+          )
+          if (-not ($candidates | Where-Object { Test-Path -LiteralPath $_ })) {
+            throw 'AviSynth+ checkout does not contain avisynth.h in a supported location.'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "AVISYNTH_ROOT=$root"
+
+      - name: Install Python validation dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check -r .\tools\requirements-validation.txt
+          if ($LASTEXITCODE -ne 0) { throw "Validation dependency installation failed with exit code $LASTEXITCODE" }
+          python --version
+          if ($LASTEXITCODE -ne 0) { throw "Python version check failed with exit code $LASTEXITCODE" }
+          python -c "import sys, yaml; print('Python runtime:', sys.version); print('PyYAML runtime:', yaml.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "Validation runtime identification failed with exit code $LASTEXITCODE" }
+
+      - name: Parse compact seek trace extraction script
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\tools\extract_seek_trace.ps1'), [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+
+      - name: Run source and scheduler validation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $validationLog = Join-Path $env:RUNNER_TEMP 'VALIDATION_RUN_0.2.58.28.txt'
+          python .\tools\validate_sync_pipeline.py | Tee-Object -FilePath $validationLog
+          if ($LASTEXITCODE -ne 0) { throw "Static validation failed with exit code $LASTEXITCODE" }
+
+      - name: Run bootstrap queue state regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'BOOTSTRAP_QUEUE_STATE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'BOOTSTRAP_QUEUE_STATE_TEST_RUN.txt'
+          $testSources = @('tools\test_bootstrap_queue_state.cpp', 'directmotion\AsyncPipelineState.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Bootstrap queue state regression tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run delivery latency diagnostics regression tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'DELIVERY_LATENCY_DIAGNOSTICS_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'DELIVERY_LATENCY_DIAGNOSTICS_TEST_RUN.txt'
+          $testSources = @('tools\test_delivery_latency_diagnostics.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Delivery latency diagnostics regression tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run bounded decoupled source-bootstrap queue tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SourceBootstrapQueue.h')) { throw 'SourceBootstrapQueue.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SOURCE_BOOTSTRAP_QUEUE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SOURCE_BOOTSTRAP_QUEUE_TEST_RUN_0.2.58.12.txt'
+          $testSources = @('tools\test_source_bootstrap_queue.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Decoupled source-bootstrap queue tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable MAnalyse single-scheduler policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\MAnalyseInvocationPolicy.h')) { throw 'MAnalyseInvocationPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'MANALYSE_SCHEDULER_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'MANALYSE_SCHEDULER_POLICY_TEST_RUN_0.2.58.25.txt'
+          $testSources = @('tools\test_manalyse_invocation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "MAnalyse single-scheduler policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable pipeline stall classifier tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PIPELINE_STALL_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PIPELINE_STALL_TEST_RUN_0.2.57.txt'
+          $testSources = @('tools\test_pipeline_stall_diagnostics.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Pipeline stall classifier tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable source-cache retention tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SOURCE_CACHE_RETENTION_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SOURCE_CACHE_RETENTION_TEST_RUN_0.2.58.25.txt'
+          $testSources = @('tools\test_source_cache_retention.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Source-cache retention tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable Pause/delivery-fence lifecycle tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PAUSE_DELIVERY_FENCE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PAUSE_DELIVERY_FENCE_TEST_RUN_0.2.57.txt'
+          $testSources = @('tools\test_pause_delivery_fence.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Pause/delivery-fence lifecycle tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable paused-frame one-shot and stale-epoch tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PAUSE_FRAME_GATE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PAUSE_FRAME_GATE_TEST_RUN_0.2.57.txt'
+          $testSources = @('tools\test_pause_frame_gate.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Paused-frame one-shot/epoch tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable Pause/Run source-backpressure tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PAUSE_RECEIVE_BACKPRESSURE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PAUSE_RECEIVE_BACKPRESSURE_TEST_RUN_0.2.57_FIX3_5.txt'
+          $testSources = @('tools\test_pause_receive_backpressure.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Pause/Run source-backpressure tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable resume warm-start policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'RESUME_WARM_START_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'RESUME_WARM_START_TEST_RUN_0.2.57_FIX3_6.txt'
+          $testSources = @('tools\test_resume_warm_start.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Resume warm-start policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable processing-worker continuation tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\ProcessingContinuation.h')) { throw 'ProcessingContinuation.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PROCESSING_CONTINUATION_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PROCESSING_CONTINUATION_TEST_RUN_0.2.57_FIX3_7.txt'
+          $testSources = @('tools\test_processing_continuation.cpp', 'directmotion\AsyncPipelineState.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Processing-worker continuation tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable processing-worker generation guard tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\ProcessingGenerationPolicy.h')) { throw 'ProcessingGenerationPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PROCESSING_GENERATION_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PROCESSING_GENERATION_POLICY_TEST_RUN_0.2.57_FIX5_6.txt'
+          $testSources = @('tools\test_processing_generation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Processing-worker generation guard tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable Receive generation commit-gate tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\ReceiveCommitPolicy.h')) { throw 'ReceiveCommitPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'RECEIVE_GENERATION_COMMIT_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'RECEIVE_GENERATION_COMMIT_TEST_RUN_0.2.58.8.txt'
+          $testSources = @('tools\test_receive_generation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Receive generation commit-gate tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable initial-preroll admission tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\InitialPrerollPolicy.h')) { throw 'InitialPrerollPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'INITIAL_PREROLL_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'INITIAL_PREROLL_POLICY_TEST_RUN_0.2.57_FIX5_7.txt'
+          $testSources = @('tools\test_initial_preroll_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Initial-preroll admission tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable Pause/Run timeline-retention tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PAUSE_RETENTION_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PAUSE_RETENTION_POLICY_TEST_RUN_0.2.58.21.txt'
+          $testSources = @('tools\test_pause_retention_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Pause/Run timeline-retention tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run bounded asynchronous output FIFO tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'ASYNC_PIPELINE_STATE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'ASYNC_PIPELINE_STATE_TEST_RUN_0.2.58.txt'
+          $testSources = @('tools\test_async_pipeline_state.cpp', 'directmotion\AsyncPipelineState.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Bounded async output FIFO tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run deferred seek engine-quiescence lifecycle tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'PROCESSING_QUIESCENCE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'PROCESSING_QUIESCENCE_TEST_RUN_0.2.58_FIX2_2.txt'
+          $testSources = @('tools\test_processing_quiescence.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Deferred seek engine-quiescence tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable progressive seek fallback policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekFallbackPolicy.h')) { throw 'SeekFallbackPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_FALLBACK_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_FALLBACK_POLICY_TEST_RUN_0.2.58.10.txt'
+          $testSources = @('tools\test_seek_fallback_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Progressive seek fallback policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run portable DirectShow sample GetTime policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SampleTimePolicy.h')) { throw 'SampleTimePolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SAMPLE_TIME_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SAMPLE_TIME_POLICY_TEST_RUN_0.2.58.13.txt'
+          $testSources = @('tools\test_sample_time_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Sample GetTime policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run post-seek engine candidate commit policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\EngineBootstrapCommitPolicy.h')) { throw 'EngineBootstrapCommitPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'ENGINE_BOOTSTRAP_COMMIT_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'ENGINE_BOOTSTRAP_COMMIT_POLICY_TEST_RUN_0.2.58.14.txt'
+          $testSources = @('tools\test_engine_bootstrap_commit_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Post-seek engine candidate commit policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run overlapping lifecycle transition gate tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\LifecycleTransitionGate.h')) { throw 'LifecycleTransitionGate.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'LIFECYCLE_TRANSITION_GATE_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'LIFECYCLE_TRANSITION_GATE_TEST_RUN_0.2.58.15.txt'
+          $testSources = @('tools\test_lifecycle_transition_gate.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Overlapping lifecycle transition gate tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run generation-owned seek fallback tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekFallbackGenerationPolicy.h')) { throw 'SeekFallbackGenerationPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_FALLBACK_GENERATION_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_FALLBACK_GENERATION_POLICY_TEST_RUN_0.2.58.16.txt'
+          $testSources = @('tools\test_seek_fallback_generation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Generation-owned seek fallback tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run segment-owned deferred seek reset tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekResetGenerationPolicy.h')) { throw 'SeekResetGenerationPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_RESET_GENERATION_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_RESET_GENERATION_POLICY_TEST_RUN_0.2.58.18.txt'
+          $testSources = @('tools\test_seek_reset_generation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Segment-owned seek reset tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run generation-owned seek transition blend tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekTransitionBlend.h')) { throw 'SeekTransitionBlend.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_TRANSITION_BLEND_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_TRANSITION_BLEND_TEST_RUN_0.2.58.19.txt'
+          $testSources = @('tools\test_seek_transition_blend.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Seek transition blend tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run seek-frontier bootstrap policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekFrontierPolicy.h')) { throw 'SeekFrontierPolicy.h is missing from the source package.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\BootstrapEvaluationPolicy.h')) { throw 'BootstrapEvaluationPolicy.h is missing from the source package.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SourceCacheRetention.h')) { throw 'SourceCacheRetention.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_FRONTIER_BOOTSTRAP_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_FRONTIER_BOOTSTRAP_TEST_RUN_0.2.58.25.txt'
+          $testSources = @('tools\test_bootstrap_evaluation_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Seek-frontier bootstrap tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run generation-owned seek handoff status policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\SeekHandoffStatusPolicy.h')) { throw 'SeekHandoffStatusPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'SEEK_HANDOFF_STATUS_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'SEEK_HANDOFF_STATUS_TEST_RUN_0.2.58.25.txt'
+          $testSources = @('tools\test_seek_handoff_status.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Seek handoff status policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Verify persistent AviSynth runtime session source contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = Get-Content -Raw '.\directmotion\AviSynthMvToolsEngine.cpp'
+          $header = Get-Content -Raw '.\directmotion\AviSynthMvToolsEngine.h'
+          if ($engine -notmatch 'AviSynthRuntimeSession::EnsureReady') { throw 'Persistent runtime-session initializer is missing.' }
+          if ($engine -notmatch 'if \(m_ready && m_env\)') { throw 'Runtime-session reuse fast path is missing.' }
+          if ($engine -notmatch 'AviSynthRuntimeSession::DestroyEnvironment') { throw 'Runtime-session teardown is missing.' }
+          $graphReset = $engine.Substring($engine.IndexOf('void AviSynthMvToolsEngine::Reset() noexcept'))
+          if ($graphReset -match 'DeleteScriptEnvironment') { throw 'Graph reset must not destroy the retained script environment.' }
+          if ($header.IndexOf('m_avisynthRuntimeSession') -gt $header.IndexOf('std::unique_ptr<ActiveFrucEngine> m_engine')) { throw 'Runtime session must outlive the graph engine.' }
+
+      - name: Run initial-segment prepared-graph adoption policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\InitialSegmentGraphPolicy.h')) { throw 'InitialSegmentGraphPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'INITIAL_SEGMENT_GRAPH_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'INITIAL_SEGMENT_GRAPH_POLICY_TEST_RUN_0.2.58.26.txt'
+          $testSources = @('tools\test_initial_segment_graph_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Initial-segment graph adoption policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run initial-segment preroll staging and callback-order policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\InitialSegmentStagingPolicy.h')) { throw 'InitialSegmentStagingPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'INITIAL_SEGMENT_STAGING_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'INITIAL_SEGMENT_STAGING_POLICY_TEST_RUN_0.2.58.27.txt'
+          $testSources = @('tools\test_initial_segment_staging_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Initial-segment preroll staging policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Run initial InputClip source-generation rebinding policy tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe was not found.' }
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) { throw 'A Visual C++ x64 toolset installation was not found.' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw 'vcvars64.bat was not found.' }
+          if (-not (Test-Path -LiteralPath '.\directmotion\InitialSourceGenerationRebindPolicy.h')) { throw 'InitialSourceGenerationRebindPolicy.h is missing from the source package.' }
+          $testExe = Join-Path $env:RUNNER_TEMP 'INITIAL_SOURCE_GENERATION_REBIND_POLICY_TEST.exe'
+          $testLog = Join-Path $env:RUNNER_TEMP 'INITIAL_SOURCE_GENERATION_REBIND_POLICY_TEST_RUN_0.2.58.28.txt'
+          $testSources = @('tools\test_initial_source_generation_rebind_policy.cpp') | ForEach-Object { Join-Path $env:GITHUB_WORKSPACE $_ }
+          $sourceArguments = ($testSources | ForEach-Object { '"' + $_ + '"' }) -join ' '
+          $command = '"' + $vcvars + '" >nul && cd /d "' + $env:RUNNER_TEMP + '" && cl /nologo /std:c++17 /EHsc ' + $sourceArguments + ' /Fe:"' + $testExe + '" && "' + $testExe + '" > "' + $testLog + '"'
+          cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw "Initial InputClip source-generation rebinding policy tests failed with exit code $LASTEXITCODE" }
+          Get-Content -LiteralPath $testLog
+
+      - name: Build directmotion.ax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:MSVC_PLATFORM_TOOLSET = 'v143'
+          & .\build_release.cmd
+          if ($LASTEXITCODE -ne 0) { throw "build_release.cmd failed with exit code $LASTEXITCODE" }
+          $ax = '.\bin_x64\lib\directmotion.ax'
+          if (-not (Test-Path -LiteralPath $ax)) { throw "Build reported success but $ax is missing." }
+          $item = Get-Item -LiteralPath $ax
+          Write-Host "Built $($item.FullName) ($($item.Length) bytes)"
+
+      - name: Upload directmotion.ax only
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: DirectMotion_x64
+          path: bin_x64/lib/directmotion.ax
+          if-no-files-found: error
+          retention-days: 90
