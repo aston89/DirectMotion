@@ -27,13 +27,6 @@ This README documents the implemented architecture, supported formats, build req
 - [Settings and compatibility](#settings-and-compatibility)
 - [Runtime diagnostics](#runtime-diagnostics)
 - [Build](#build)
-- [Continuous integration](#continuous-integration)
-- [Runtime deployment](#runtime-deployment)
-- [Validation and tests](#validation-and-tests)
-- [Troubleshooting](#troubleshooting)
-- [Development guidelines](#development-guidelines)
-- [Release artifacts](#release-artifacts)
-- [License](#license)
 
 ## Highlights
 
